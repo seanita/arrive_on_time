@@ -2,18 +2,165 @@ import os
 import time
 import datetime
 import requests
+import sys
 
 import pandas as pd
 import numpy as np
 import matplotlib
-matplotlib.use("TkAgg")
-
+# matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 
 import tools
 from decision_tree import DecisionTree
 from judge import Judge
 
+
+def recommend(
+    datestrs,
+    name = 'departure_tree',
+    verbose = False,
+):
+    """
+    Parameters
+    ---------
+    datestrs: list of strings
+        Datestrings of the format YYYY-MM-DD
+    names: string
+        The stems fo the filename where the model is store.
+    verbose: boolean
+
+    Returns
+    -------
+    recommendations: dict of int
+        Dictionary keys are datestrings and values are departure times
+    """
+    model_name = name + '.pickle'
+    try:
+        # Try to load a saved tree
+        tree = tools.restore(model_name)
+    except Exception:
+        # If unsuccessful, create a new one
+        tree = create_tree(verbose=verbose)
+        tools.store(tree, model_name)
+
+    features_df = create_features(datestrs)
+    departures = {}
+    for datestr in datestrs:
+        estimated_departure = tree.estimate(features_df.loc[datestr, :])
+        departures[datestr] = estimated_departure
+
+    return departures
+
+def create_tree(verbose=False):
+    """
+    Parameters
+    ----------
+    verbose: boolean
+
+    Return
+    ------
+    tree: DecisionTree
+    """
+    # Load the data
+    trips = get_trips()
+    arrival_times_df = get_arrival_times(trips)
+    # arrival_times_df = calculate_arrival_times(trips, debug=False)
+    # features_df = create_features(list(arrival_times_df.columns))
+
+    # Assume nan means that the train is late.
+    arrival_times_df.fillna(value=30, inplace=True)
+
+    # Split data into training and test sets
+    training_dates = []
+    tuning_dates = []
+    testing_dates = []
+
+    last_training_day = datetime.datetime.strptime('2017-09-01', '%Y-%m-%d')
+    last_tuning_day = datetime.datetime.strptime('2018-09-01','%Y-%m-%d')
+
+    for datestr in arrival_times_df.columns:
+        this_date = datetime.datetime.strptime(datestr, '%Y-%m-%d')
+        if this_date <= last_training_day:
+            training_dates.append(datestr)
+        if this_date <= last_tuning_day:
+            tuning_dates.append(datestr)
+        else:
+            testing_dates.append(datestr)
+
+    training_df = arrival_times_df.loc[:, training_dates]
+    tuning_df = arrival_times_df.loc[:, tuning_dates]
+    testing_df = arrival_times_df.loc[:, testing_dates]
+
+    training_features_df = create_features(list(training_df.columns))
+    # judge = Judge(arrival_times_df)
+    judge = Judge(training_df)
+
+    # Tune our hyperparameter.
+    # Iterate over values for n_min.
+    best_tuning_score = 1e10
+    best_n_min = 0
+    best_tree = None
+    for n_min in range(10, 100, 10):
+        tree = DecisionTree(err_fn=judge.find_total_absolute_deviation, n_min=n_min)
+        # tree.train(features_df)
+        tree.train(training_features_df)
+        training_score = evaluate(tree, training_df)
+        tuning_score = evaluate(tree, tuning_df)
+
+        if tuning_score < best_tuning_score:
+            best_tuning_score = tuning_score
+            best_n_min = n_min
+            best_tree = tree
+        
+        if verbose:
+            print('n_min', n_min)
+            print('training', training_score)
+            print('tuning', tuning_score)
+            tree.render()
+
+    testing_score = evaluate(best_tree, testing_df)
+    
+    if verbose:
+        print('best_n_min', best_n_min)
+        print('best_tuning', best_tuning_score)
+        print('testing score', testing_score)
+    
+    return best_tree
+
+def evaluate(tree, arrivals_df, debug=False):
+    """
+    Compare the empirical best departure time for each day with 
+    the model's estimate.
+
+    Parameters
+    ---------
+    tree: DataFrame
+        The model against which to compare.
+    arrivals_df: DataFrame
+        The empirical data set against which to compare.
+    debug: boolean
+
+    Returns
+    ------
+    mean absolute error: list of floats
+        The typical number of minutes between the optimal departure,
+        and the one recommended by the model.
+    """
+    datestrs = list(arrivals_df.columns)
+    features = create_features(datestrs)
+    deviation = []
+    for datestr in datestrs:
+        estimated_departure = tree.estimate(features.loc[datestr, :])
+        lateness = arrivals_df.loc[:, datestr]
+        deviation.append(lateness.loc[estimated_departure])
+        if debug:
+            print(datestr, 'est', estimated_departure, 'dev', deviation[-1])
+    if debug:
+        plt.plot(deviation, linestyle='none', marker='.')
+        plt.ylabel('minutes late')
+        plt.show()
+
+    return np.mean(np.abs(deviation))
 
 def download_data(verbose=True):
     """
@@ -41,7 +188,7 @@ def download_data(verbose=True):
     start_time = datetime.time(7, 0)
     end_time = datetime.time(10, 0)
 
-    start_date = datetime.date(2019, 1, 1)
+    start_date = datetime.date(2016, 9, 1)
     end_date = datetime.date(2019, 9, 17)
 
     TTravelURL = "http://realtime.mbta.com/developer/api/v2.1/traveltimes"
@@ -265,21 +412,20 @@ def create_features(datestrs):
     
     features_df = pd.DataFrame(data=feature_data, index=datestrs)
     return features_df
+# Do this when the module is ru as a script:
+# > python3 departure_alarm.py 2018-08-25 2018-08-26 2001812-24
 
 if __name__== '__main__':
     os.environ['TZ'] = 'US/Eastern'
     time.tzset()
-
-    #trips = download_data()
-    trips = get_trips()
-    arrival_times_df = calculate_arrival_times(trips, debug=False)
-    # print(arrival_times_df)
-    features_df = create_features(list(arrival_times_df.columns))
-    # print(features_df)
-    arrival_times_df.fillna(value=30, inplace=True)
-    #print(arrival_times_df)
-    judge = Judge(arrival_times_df)
-    tree = DecisionTree(err_fn=judge.find_total_absolute_deviation)
-    # print(tree)
-    tree.train(features_df)
-    tree.render()
+    """
+    Arguments
+    ---------
+    strings
+        Each command line argument is assumed to be a date string
+        of xthe form YYYY-MM-DD
+    """
+    recommendations = recommend(sys.argv[1:], verbose=False)
+    print(recommendations)
+    # create_tree(verbose=True)
+    # tree.render()

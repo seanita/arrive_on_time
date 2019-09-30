@@ -1,6 +1,4 @@
 import numpy as np
-import matplotlib
-matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 
 from tree_node import TreeNode
@@ -104,7 +102,7 @@ class DecisionTree(object):
         Create a plot that describes the tree.
         """
         plt.figure()
-        # plt.clf()
+        plt.clf()
 
 
         def plot_node(node, level, x):
